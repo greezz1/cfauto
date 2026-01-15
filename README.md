@@ -1,6 +1,9 @@
 # 🚀 Cloudflare Worker 多项目部署管理器 (V6.8)
 
 这是一个运行在 Cloudflare Worker 上的高级部署与管理工具，专为管理多个 Cloudflare 账号下的 Worker 项目（如 EdgeTunnel、CFNew 等）而设计。它集成了代码自动部署、变量管理、流量监控、熔断保护和多端适配等功能，是批量管理节点的终极解决方案。
+<img width="1660" height="631" alt="image" src="https://github.com/user-attachments/assets/7ebf9a00-7042-434e-b8e6-c4b8d2084639" />
+<img width="1690" height="885" alt="image" src="https://github.com/user-attachments/assets/d7fc7844-d9b4-44d9-b169-95953450bad9" />
+
 
 ## ✨ 主要功能
 
