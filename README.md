@@ -1,5 +1,6 @@
 # 🚀 Cloudflare Worker 多项目部署管理器 (Worker Manager Pro V9.8)
 可能这个项目并不完善，请自行AI修改
+
 这是一个运行在 Cloudflare Worker 上的高级中控面板，专为管理和批量部署复杂的 Worker 项目（如 EdgeTunnel, 少年你相信光吗, ECH Proxy 等）而设计。
 
 **V9.8 版本** 解决了传统部署的繁琐痛点，支持多账号管理、版本回滚、自定义域名自动化绑定、以及智能的资源清理功能。
