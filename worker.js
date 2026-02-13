@@ -1,7 +1,5 @@
 /**
- * Cloudflare Worker 多项目部署管理器 (V9.8)
- */
-
+ * Cloudflare Worker 多项目部署管理器 (V9.9.1 - Fix Sync)
 // ==========================================
 // 1. 项目模板与配置常量
 // ==========================================
@@ -14,7 +12,7 @@ const TEMPLATES = {
       ghPath: "_worker.js",
       defaultVars: ["UUID", "PROXYIP", "DOH", "PATH", "URL", "KEY", "ADMIN"],
       uuidField: "UUID",
-      description: "CMliu (beta2.0)"
+      description: "CMliu (beta2.0) - 建议开启 KV"
     },
     'joey': {
       name: "Joey - 少年你相信光吗",
@@ -24,7 +22,7 @@ const TEMPLATES = {
       ghPath: "少年你相信光吗",
       defaultVars: ["u", "d", "p"],
       uuidField: "u",
-      description: "Joey (自动修复)"
+      description: "Joey (自动修复) - KV 可选"
     },
     'ech': {
       name: "ECH - WebSocket Proxy",
@@ -38,7 +36,7 @@ const TEMPLATES = {
     }
   };
   
-  // [全量补全] ProxyIP 列表 (含港/日/韩/新/美/欧)
+  // [全量补全] ProxyIP 列表
   const ECH_PROXIES = [
       {group:"Global", list:["ProxyIP.CMLiussss.net", "ProxyIP.Aliyun.CMLiussss.net", "ProxyIP.Oracle.CMLiussss.net"]},
       {group:"HK (香港)", list:["ProxyIP.HK.CMLiussss.net", "ProxyIP.Aliyun.HK.CMLiussss.net", "ProxyIP.Oracle.HK.CMLiussss.net"]},
@@ -61,16 +59,8 @@ const TEMPLATES = {
     // ================= HTTP 请求入口 =================
     async fetch(request, env) {
       try {
-          // [核心检查] 防止 KV 未绑定导致的 1101
           if (!env.CONFIG_KV) {
-              return new Response(`
-                  <html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
-                  <h1 style="color: red;">配置错误 (KV Not Bound)</h1>
-                  <p>检测到 Worker 未绑定 KV 命名空间，导致无法运行。</p>
-                  <p>请到 Cloudflare Dashboard -> Settings -> Variables -> KV Namespace Bindings</p>
-                  <p>绑定一个 KV，变量名必须设置为: <strong>CONFIG_KV</strong></p>
-                  </body></html>
-              `, { status: 500, headers: { "Content-Type": "text/html;charset=utf-8" } });
+              return new Response(`KV Not Bound`, { status: 500 });
           }
 
           const url = new URL(request.url);
@@ -78,20 +68,14 @@ const TEMPLATES = {
           const urlCode = url.searchParams.get("code");
           const cookieHeader = request.headers.get("Cookie") || "";
           
-          // PWA Manifest
           if (url.pathname === "/manifest.json") {
               return new Response(JSON.stringify({
-                  "name": "Worker Pro",
-                  "short_name": "WorkerPro",
-                  "start_url": "/",
-                  "display": "standalone",
-                  "background_color": "#f3f4f6",
-                  "theme_color": "#1e293b",
+                  "name": "Worker Pro", "short_name": "WorkerPro", "start_url": "/", "display": "standalone",
+                  "background_color": "#f3f4f6", "theme_color": "#1e293b",
                   "icons": [{ "src": "https://www.cloudflare.com/img/logo-cloudflare-dark.svg", "sizes": "192x192", "type": "image/svg+xml" }]
               }), { headers: { "Content-Type": "application/json" } });
           }
     
-          // 登录验证
           if (correctCode && !cookieHeader.includes(`auth=${correctCode}`) && urlCode !== correctCode) {
             return new Response(loginHtml(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
           }
@@ -99,7 +83,7 @@ const TEMPLATES = {
           const ACCOUNTS_KEY = `ACCOUNTS_UNIFIED_STORAGE`; 
           const GLOBAL_CONFIG_KEY = `AUTO_UPDATE_CFG_GLOBAL`;
       
-          // API 路由分发
+          // API 路由
           if (url.pathname === "/api/accounts") {
             if (request.method === "GET") return new Response(await env.CONFIG_KV.get(ACCOUNTS_KEY) || "[]", { headers: { "Content-Type": "application/json" } });
             if (request.method === "POST") { await env.CONFIG_KV.put(ACCOUNTS_KEY, JSON.stringify(await request.json())); return new Response(JSON.stringify({ success: true })); }
@@ -141,7 +125,6 @@ const TEMPLATES = {
               const { type, mode, limit } = Object.fromEntries(url.searchParams);
               return await handleCheckUpdate(env, type, mode, limit || 10);
           }
-          // 部署相关 API
           if (url.pathname === "/api/deploy" && request.method === "POST") {
             const { type, variables, deletedVariables, targetSha } = await request.json();
             return await handleManualDeploy(env, type, variables, deletedVariables, ACCOUNTS_KEY, targetSha);
@@ -150,7 +133,6 @@ const TEMPLATES = {
             const data = await request.json(); 
             return await handleBatchDeploy(env, data, ACCOUNTS_KEY);
           }
-          // 账号/域名管理 API
           if (url.pathname === "/api/zones" && request.method === "POST") {
               const { accountId, email, globalKey } = await request.json();
               return await handleGetZones(accountId, email, globalKey);
@@ -159,10 +141,10 @@ const TEMPLATES = {
               const { accountId, email, globalKey } = await request.json();
               return await handleGetAllWorkers(accountId, email, globalKey);
           }
-          // [重要] 删除 Worker API
+          // [重要更新] 传入 env 以便删除时同步更新 KV
           if (url.pathname === "/api/delete_worker" && request.method === "POST") {
               const { accountId, email, globalKey, workerName, deleteKv } = await request.json();
-              return await handleDeleteWorker(accountId, email, globalKey, workerName, deleteKv);
+              return await handleDeleteWorker(env, accountId, email, globalKey, workerName, deleteKv);
           }
           if (url.pathname === "/api/stats") return await handleStats(env, ACCOUNTS_KEY);
           if (url.pathname === "/api/fetch_bindings" && request.method === "POST") {
@@ -177,14 +159,7 @@ const TEMPLATES = {
           return response;
 
       } catch (err) {
-          // 全局异常捕获
-          return new Response(`
-              <html><body style="font-family: monospace; padding: 20px; background: #fff0f0; color: #cc0000;">
-              <h1>System Error (Protection Mode)</h1>
-              <p>Manager Worker encountered an exception:</p>
-              <pre style="background: #fff; padding: 15px; border: 1px solid #ffcccc;">${err.message}\n\n${err.stack}</pre>
-              </body></html>
-          `, { status: 500, headers: { "Content-Type": "text/html" } });
+          return new Response(`System Error: ${err.message}\n${err.stack}`, { status: 500 });
       }
     }
   };
@@ -204,7 +179,6 @@ const TEMPLATES = {
       return { "X-Auth-Email": email, "X-Auth-Key": key, "Content-Type": "application/json" };
   }
 
-  // [Error 808 修复] 上传专用鉴权头
   function getUploadHeaders(email, key) {
       return { "X-Auth-Email": email, "X-Auth-Key": key };
   }
@@ -293,8 +267,12 @@ const TEMPLATES = {
   
   async function handleCheckUpdate(env, type, mode, limit = 10) {
       try {
-          const VERSION_KEY = `VERSION_INFO_${type}`;
-          const localData = JSON.parse(await env.CONFIG_KV.get(VERSION_KEY) || "null");
+          const DEPLOY_CONFIG_KEY = `DEPLOY_CONFIG_${type}`;
+          const deployConfig = JSON.parse(await env.CONFIG_KV.get(DEPLOY_CONFIG_KEY) || '{"mode":"latest"}');
+          
+          const localSha = deployConfig.currentSha;
+          const localTime = deployConfig.deployTime;
+
           const { apiUrl, branch } = getGithubUrls(type);
           
           let fetchUrl = apiUrl + (mode === 'history' ? `?sha=${branch}&per_page=${limit}` : `?sha=${branch}&per_page=1`);
@@ -307,11 +285,23 @@ const TEMPLATES = {
           
           if (mode === 'history') return new Response(JSON.stringify({ history: ghData }), { headers: { "Content-Type": "application/json" } });
   
-          const commitObj = Array.isArray(ghData) ? ghData[0] : ghData;
+          const latestCommit = Array.isArray(ghData) ? ghData[0] : ghData;
+          
+          let localCommitInfo = null;
+          if (localSha) {
+             if (localSha === latestCommit.sha) {
+                 localCommitInfo = { sha: localSha, date: latestCommit.commit.committer.date }; 
+             } else {
+                 localCommitInfo = { sha: localSha, date: localTime }; 
+             }
+          }
+
           return new Response(JSON.stringify({ 
-              local: localData, 
-              remote: { sha: commitObj.sha, date: commitObj.commit.committer.date, message: commitObj.commit.message } 
+              local: localCommitInfo,
+              remote: { sha: latestCommit.sha, date: latestCommit.commit.committer.date, message: latestCommit.commit.message },
+              mode: deployConfig.mode 
           }), { headers: { "Content-Type": "application/json" } });
+
       } catch (e) { return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
   }
   
@@ -322,7 +312,7 @@ const TEMPLATES = {
 
   // ================= 批量部署逻辑 (增强版) =================
   async function handleBatchDeploy(env, reqData, accountsKey) {
-    const { template, workerName, kvName, config, targetAccounts, disableWorkersDev, customDomainPrefix } = reqData;
+    const { template, workerName, kvName, config, targetAccounts, disableWorkersDev, customDomainPrefix, enableKV } = reqData;
     const allAccounts = JSON.parse(await env.CONFIG_KV.get(accountsKey) || "[]");
     
     const accountsToDeploy = allAccounts.filter(a => targetAccounts.includes(a.alias));
@@ -347,27 +337,29 @@ const TEMPLATES = {
         try {
             const jsonHeaders = getAuthHeaders(acc.email, acc.globalKey);
             
-            // 1. 获取/创建 KV
             let nsId = "";
-            const nsListRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc.accountId}/storage/kv/namespaces?per_page=100`, {headers: jsonHeaders});
-            if (!nsListRes.ok) throw new Error("无法读取KV列表");
-            const nsList = (await nsListRes.json()).result;
-            const existNs = nsList.find(n => n.title === kvName);
-            
-            if (existNs) {
-                nsId = existNs.id;
-            } else {
-                const createNsRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc.accountId}/storage/kv/namespaces`, {
-                    method: 'POST', headers: jsonHeaders, body: JSON.stringify({title: kvName})
-                });
-                if(!createNsRes.ok) throw new Error("创建KV失败: " + (await createNsRes.json()).errors[0].message);
-                nsId = (await createNsRes.json()).result.id;
+            if (enableKV) {
+                const nsListRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc.accountId}/storage/kv/namespaces?per_page=100`, {headers: jsonHeaders});
+                if (!nsListRes.ok) throw new Error("无法读取KV列表");
+                const nsList = (await nsListRes.json()).result;
+                const existNs = nsList.find(n => n.title === kvName);
+                
+                if (existNs) {
+                    nsId = existNs.id;
+                } else {
+                    const createNsRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc.accountId}/storage/kv/namespaces`, {
+                        method: 'POST', headers: jsonHeaders, body: JSON.stringify({title: kvName})
+                    });
+                    if(!createNsRes.ok) throw new Error("创建KV失败: " + (await createNsRes.json()).errors[0].message);
+                    nsId = (await createNsRes.json()).result.id;
+                }
             }
 
-            // 2. 准备 Bindings (含 UUID 自动填充)
             const bindings = [];
-            if (template === 'cmliu') bindings.push({ name: "KV", type: "kv_namespace", namespace_id: nsId });
-            if (template === 'joey') bindings.push({ name: "C", type: "kv_namespace", namespace_id: nsId });
+            if (enableKV && nsId) {
+                if (template === 'cmliu') bindings.push({ name: "KV", type: "kv_namespace", namespace_id: nsId });
+                if (template === 'joey') bindings.push({ name: "C", type: "kv_namespace", namespace_id: nsId });
+            }
 
             if (config.admin) bindings.push({ name: "ADMIN", type: "plain_text", text: config.admin });
             if (template === 'joey' && config.uuid) bindings.push({ name: "u", type: "plain_text", text: config.uuid });
@@ -383,7 +375,6 @@ const TEMPLATES = {
                 }
             });
 
-            // 3. 部署 Worker (使用 Upload Headers - Error 808 Fix)
             const metadata = { main_module: "index.js", bindings: bindings, compatibility_date: "2024-01-01" };
             const formData = new FormData();
             formData.append("metadata", JSON.stringify(metadata));
@@ -398,7 +389,6 @@ const TEMPLATES = {
                 log.success = true;
                 let msgs = [];
 
-                // 4. 自定义域名
                 if (customDomainPrefix && acc.defaultZoneId && acc.defaultZoneName) {
                     const hostname = `${customDomainPrefix}.${acc.defaultZoneName}`;
                     const domainRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc.accountId}/workers/domains`, {
@@ -409,7 +399,6 @@ const TEMPLATES = {
                     else msgs.push(`⚠️ 域名绑定失败`);
                 }
 
-                // 5. 默认域名开关
                 if (disableWorkersDev) {
                     await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc.accountId}/workers/scripts/${workerName}/subdomain`, {
                         method: "POST", headers: jsonHeaders, body: JSON.stringify({ enabled: false })
@@ -458,6 +447,7 @@ const TEMPLATES = {
           const { scriptUrl, apiUrl } = getGithubUrls(type, targetSha);
           let githubScriptContent = "";
           let deployedSha = targetSha;
+          let remoteCommitDate = null;
           
           try {
               const codeRes = await fetch(scriptUrl + `?t=${Date.now()}`);
@@ -468,7 +458,11 @@ const TEMPLATES = {
                   const headers = { "User-Agent": "CF-Worker" };
                   if (env.GITHUB_TOKEN) headers["Authorization"] = `token ${env.GITHUB_TOKEN}`;
                   const apiRes = await fetch(apiUrl + `?sha=${TEMPLATES[type].ghBranch}&per_page=1`, { headers });
-                  if (apiRes.ok) deployedSha = (await apiRes.json())[0].sha;
+                  if (apiRes.ok) {
+                      const commitData = (await apiRes.json())[0];
+                      deployedSha = commitData.sha;
+                      remoteCommitDate = commitData.commit.committer.date;
+                  }
               }
           } catch (e) { return [{ name: "网络错误", success: false, msg: e.message }]; }
   
@@ -523,9 +517,6 @@ const TEMPLATES = {
           }
   
           if (deployedSha) {
-              const VERSION_KEY = `VERSION_INFO_${type}`;
-              await env.CONFIG_KV.put(VERSION_KEY, JSON.stringify({ sha: deployedSha, deployDate: new Date().toISOString() }));
-              
               const DEPLOY_CONFIG_KEY = `DEPLOY_CONFIG_${type}`;
               const mode = targetSha ? 'fixed' : 'latest';
               await env.CONFIG_KV.put(DEPLOY_CONFIG_KEY, JSON.stringify({ mode: mode, currentSha: deployedSha, deployTime: new Date().toISOString() }));
@@ -566,7 +557,6 @@ const TEMPLATES = {
       } catch(e) { return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
   }
 
-  // [同步修复] 增加 fetch bindings 接口逻辑
   async function handleFetchBindings(accountId, email, key, workerName) {
       try {
           const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}/bindings`, { 
@@ -580,7 +570,6 @@ const TEMPLATES = {
       } catch(e) { return new Response(JSON.stringify({ success: false, msg: e.message }), { status: 500 }); }
   }
 
-  // 获取 Zones
   async function handleGetZones(accountId, email, key) {
       try {
           const res = await fetch(`https://api.cloudflare.com/client/v4/zones?account.id=${accountId}&per_page=50`, {
@@ -607,32 +596,57 @@ const TEMPLATES = {
       } catch (e) { return new Response(JSON.stringify({ success: false, msg: e.message }), { status: 500 }); }
   }
 
-  // [修复] 删除 Worker 时同时删除 KV
-  async function handleDeleteWorker(accountId, email, key, workerName, deleteKv) {
+  // [修复] 删除 Worker 时同步移除本地配置
+  async function handleDeleteWorker(env, accountId, email, key, workerName, deleteKv) {
       try {
           const headers = getAuthHeaders(email, key);
           
+          let kvNamespaceIds = [];
           if (deleteKv) {
               const bindRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}/bindings`, { headers });
               if (bindRes.ok) {
                   const binds = (await bindRes.json()).result;
-                  const kvBinds = binds.filter(b => b.type === 'kv_namespace');
-                  for (const kv of kvBinds) {
-                      await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${kv.namespace_id}`, {
-                          method: "DELETE", headers
-                      });
-                  }
+                  kvNamespaceIds = binds.filter(b => b.type === 'kv_namespace').map(b => b.namespace_id);
               }
           }
 
-          const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}`, {
+          const delWorkerRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}`, {
               method: "DELETE", headers
           });
           
-          if (res.ok) {
-              return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+          if (delWorkerRes.ok) {
+               // [同步逻辑] 从 KV 中移除该 Worker 记录
+               const ACCOUNTS_KEY = `ACCOUNTS_UNIFIED_STORAGE`;
+               const accounts = JSON.parse(await env.CONFIG_KV.get(ACCOUNTS_KEY) || "[]");
+               let updated = false;
+
+               for (const acc of accounts) {
+                   if (acc.accountId === accountId) {
+                       ['workers_cmliu', 'workers_joey', 'workers_ech'].forEach(type => {
+                           if (acc[type] && acc[type].includes(workerName)) {
+                               acc[type] = acc[type].filter(n => n !== workerName);
+                               updated = true;
+                           }
+                       });
+                   }
+               }
+
+               if (updated) {
+                   await env.CONFIG_KV.put(ACCOUNTS_KEY, JSON.stringify(accounts));
+               }
+               // [结束同步]
+
+               if (deleteKv && kvNamespaceIds.length > 0) {
+                   await new Promise(r => setTimeout(r, 1000)); 
+                   for (const nsId of kvNamespaceIds) {
+                       await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${nsId}`, {
+                           method: "DELETE", headers
+                       });
+                   }
+               }
+               return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
           } else {
-              const err = await res.json();
+              const err = await delWorkerRes.json();
               return new Response(JSON.stringify({ success: false, msg: err.errors[0]?.message || "删除失败" }), { status: 200 });
           }
       } catch (e) { return new Response(JSON.stringify({ success: false, msg: e.message }), { status: 500 }); }
@@ -641,7 +655,7 @@ const TEMPLATES = {
   function loginHtml() { return `<!DOCTYPE html><html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6"><form method="GET"><input type="password" name="code" placeholder="密码" style="padding:10px"><button style="padding:10px">登录</button></form></body></html>`; }
   
   // ==========================================
-  // 2. 前端页面 (修复版：全量 HTML 内嵌)
+  // 2. 前端页面
   // ==========================================
   function mainHtml() {
     return `
@@ -651,7 +665,7 @@ const TEMPLATES = {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="manifest" href="/manifest.json">
-    <title>Worker 智能中控 (V9.6.1)</title>
+    <title>Worker 智能中控 (V9.9.1 Pro)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <style>
@@ -672,8 +686,8 @@ const TEMPLATES = {
       
       <header class="bg-white px-4 py-3 md:px-6 md:py-4 rounded shadow flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
           <div class="flex-none">
-              <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">🚀 Worker 部署中控 <span class="text-xs bg-purple-600 text-white px-2 py-0.5 rounded ml-2">V9.6.1</span></h1>
-              <div class="text-[10px] text-gray-400 mt-1">完整回档 · 功能修正</div>
+              <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">🚀 Worker 部署中控 <span class="text-xs bg-purple-600 text-white px-2 py-0.5 rounded ml-2">V9.9.1 Pro</span></h1>
+              <div class="text-[10px] text-gray-400 mt-1">本地同步修复 · KV 开关 · 安全删除</div>
           </div>
           <div id="logs" class="bg-slate-900 text-green-400 p-2 rounded text-xs font-mono hidden max-h-[80px] lg:max-h-[50px] overflow-y-auto shadow-inner w-full lg:flex-1 lg:mx-4 order-2 lg:order-none"></div>
           
@@ -759,7 +773,7 @@ const TEMPLATES = {
                     <button onclick="openVersionHistory('cmliu')" class="text-[10px] bg-white border border-red-200 text-red-600 px-2 py-0.5 rounded hover:bg-red-50">📜 历史/收藏</button>
                 </div>
                 <div class="p-3">
-                    <div id="ver_cmliu" class="text-[10px] font-mono text-gray-400 mb-2 border-b border-gray-100 pb-2">Checking...</div>
+                    <div id="ver_cmliu" class="text-[10px] font-mono text-gray-500 mb-2 border-b border-gray-100 pb-2 space-y-1">Checking...</div>
                     <details class="group bg-slate-50 rounded border mb-2">
                         <summary class="bg-slate-100 px-2 py-1 text-xs font-bold text-gray-600 flex justify-between"><span>📝 变量列表</span><span>▼</span></summary>
                         <div id="vars_cmliu" class="p-2 space-y-1 max-h-[200px] overflow-y-auto"></div>
@@ -781,7 +795,7 @@ const TEMPLATES = {
                     <button onclick="openVersionHistory('joey')" class="text-[10px] bg-white border border-blue-200 text-blue-600 px-2 py-0.5 rounded hover:bg-blue-50">📜 历史/收藏</button>
                 </div>
                 <div class="p-3">
-                    <div id="ver_joey" class="text-[10px] font-mono text-gray-400 mb-2 border-b border-gray-100 pb-2">Checking...</div>
+                    <div id="ver_joey" class="text-[10px] font-mono text-gray-500 mb-2 border-b border-gray-100 pb-2 space-y-1">Checking...</div>
                     <details class="group bg-slate-50 rounded border mb-2">
                         <summary class="bg-slate-100 px-2 py-1 text-xs font-bold text-gray-600 flex justify-between"><span>📝 变量列表</span><span>▼</span></summary>
                         <div id="vars_joey" class="p-2 space-y-1 max-h-[200px] overflow-y-auto"></div>
@@ -822,7 +836,14 @@ const TEMPLATES = {
                     <div><label class="block text-gray-500 mb-1">Worker 名称</label><input id="bd_name" class="input-field font-bold text-indigo-700" placeholder="例如: new-proxy-01"></div>
                     <div><label class="block text-gray-500 mb-1">选择模板</label><select id="bd_template" onchange="toggleBatchInputs()" class="input-field bg-gray-50"><option value="cmliu">🔴 CMliu (EdgeTunnel)</option><option value="joey">🔵 Joey (相信光)</option></select></div>
                 </div>
-                <div><label class="block text-gray-500 mb-1">KV 空间名称</label><input id="bd_kv_name" class="input-field" placeholder="自动创建/使用同名 KV"></div>
+                
+                <div class="grid grid-cols-2 gap-3 items-end">
+                    <div><label class="block text-gray-500 mb-1">KV 空间名称</label><input id="bd_kv_name" class="input-field" placeholder="自动创建/使用同名 KV"></div>
+                    <div class="flex items-center gap-2 pb-2">
+                         <input type="checkbox" id="bd_enable_kv" class="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500" checked>
+                         <label for="bd_enable_kv" class="font-bold text-gray-700 cursor-pointer">绑定 KV 存储</label>
+                    </div>
+                </div>
                 
                 <div class="bg-slate-50 p-2 rounded border">
                     <div class="flex items-center gap-2 mb-2">
@@ -871,7 +892,7 @@ const TEMPLATES = {
                 <button onclick="document.getElementById('account_manage_modal').classList.add('hidden')" class="hover:text-gray-200">×</button>
             </div>
             <div class="p-2 border-b bg-gray-50 text-[10px] text-gray-500">
-                ⚠️ 警告：在此处删除 Worker 将不可恢复。请确认是否需要同时删除绑定的 KV。
+                ⚠️ 警告：删除逻辑为 [解绑 Worker -> 删除 Worker -> 删除 KV]。
             </div>
             <div class="flex-1 overflow-y-auto p-4">
                 <div id="manage_loading" class="text-center py-4 text-gray-400">正在加载 Workers 列表...</div>
@@ -950,7 +971,6 @@ const TEMPLATES = {
           ['cmliu','joey'].forEach(t => { checkDeployConfig(t); checkUpdate(t); });
       }
 
-      // ================= 域名预设逻辑 =================
       async function fetchZonesForAccount() {
           const email = document.getElementById('in_email').value;
           const key = document.getElementById('in_gkey').value;
@@ -984,7 +1004,6 @@ const TEMPLATES = {
           }
       }
 
-      // ================= 批量部署 =================
       function openBatchDeployModal() {
           const m = document.getElementById('batch_deploy_modal');
           const list = document.getElementById('bd_account_list');
@@ -996,6 +1015,7 @@ const TEMPLATES = {
               list.appendChild(div);
           });
           document.getElementById('bd_uuid').value = crypto.randomUUID();
+          toggleBatchInputs();
           m.classList.remove('hidden');
       }
 
@@ -1003,6 +1023,13 @@ const TEMPLATES = {
           const t = document.getElementById('bd_template').value;
           document.getElementById('bd_config_cmliu').classList.toggle('hidden', t !== 'cmliu');
           document.getElementById('bd_config_joey').classList.toggle('hidden', t !== 'joey');
+          
+          const kvCheck = document.getElementById('bd_enable_kv');
+          if (t === 'joey') {
+              kvCheck.checked = false; 
+          } else {
+              kvCheck.checked = true;  
+          }
       }
 
       async function doBatchDeploy() {
@@ -1010,8 +1037,11 @@ const TEMPLATES = {
           const t = document.getElementById('bd_template').value;
           const name = document.getElementById('bd_name').value;
           const kvName = document.getElementById('bd_kv_name').value;
+          const enableKV = document.getElementById('bd_enable_kv').checked;
           
-          if (!name || !kvName) return Swal.fire('提示', 'Worker名称和 KV名称必填', 'warning');
+          if (!name) return Swal.fire('提示', 'Worker名称必填', 'warning');
+          if (enableKV && !kvName) return Swal.fire('提示', '开启 KV 绑定时必须填写 KV 名称', 'warning');
+          
           const chks = document.querySelectorAll('.bd-acc-chk:checked');
           if (chks.length === 0) return Swal.fire('提示', '请至少选择一个账号', 'warning');
           
@@ -1045,7 +1075,8 @@ const TEMPLATES = {
                       config: config, 
                       targetAccounts: targetAccounts,
                       disableWorkersDev: disableWorkersDev,
-                      customDomainPrefix: customDomainPrefix
+                      customDomainPrefix: customDomainPrefix,
+                      enableKV: enableKV 
                   })
               });
               const logs = await res.json();
@@ -1064,7 +1095,6 @@ const TEMPLATES = {
           btn.innerText = "🚀 开始部署";
       }
 
-      // ================= 账号管理 & 删除 =================
       async function openAccountManage(i) {
           const acc = accounts[i];
           if (!acc.globalKey) return Swal.fire('无法管理', '请先配置 Global API Key', 'error');
@@ -1116,11 +1146,12 @@ const TEMPLATES = {
               title: '危险操作',
               html: \`
                 <p>确认要删除 <b>\${workerId}</b> 吗？</p>
-                <div class="mt-4 text-left bg-gray-50 p-2 rounded">
+                <div class="mt-4 text-left bg-gray-50 p-2 rounded text-xs">
                     <label class="flex items-center space-x-2">
                         <input type="checkbox" id="del_kv_chk" checked class="form-checkbox text-red-600">
-                        <span class="text-sm text-gray-700">同时删除绑定的 KV 存储 (防止残留)</span>
+                        <span class="text-gray-700 font-bold">同时删除绑定的 KV (推荐)</span>
                     </label>
+                    <p class="text-gray-400 mt-1 pl-5">执行顺序: 1.读取绑定 -> 2.删除Worker(自动解绑) -> 3.删除KV空间</p>
                 </div>
               \`,
               icon: 'warning',
@@ -1149,6 +1180,8 @@ const TEMPLATES = {
 
           if (result.isConfirmed) {
               Swal.fire('已删除', 'Worker 及相关资源已清理', 'success');
+              // 删除后立刻刷新账号列表，清除已删除的项目名
+              await loadAccounts(); 
               openAccountManage(accIndex);
           }
       }
@@ -1178,7 +1211,6 @@ const TEMPLATES = {
           }).join('');
       }
 
-      // ================= 基础逻辑 (Account/Deploy/Sync) =================
       async function loadAccounts() { try { const r = await fetch('/api/accounts'); accounts = await r.json(); accounts.forEach(a => a.stats = a.stats || {total:0,max:100000}); renderTable(); } catch(e){} }
       
       async function saveAccount() { 
@@ -1267,7 +1299,38 @@ const TEMPLATES = {
       async function loadVars(t){ const c=document.getElementById(\`vars_\${t}\`); c.innerHTML='<div class="text-center text-gray-300">...</div>'; try{ const r=await fetch(\`/api/settings?type=\${t}\`); const v=await r.json(); const m=new Map(); if(Array.isArray(v))v.forEach(x=>m.set(x.key,x.value)); TEMPLATES[t].defaultVars.forEach(k=>{ if(!m.has(k))m.set(k,k===TEMPLATES[t].uuidField?crypto.randomUUID():'') }); c.innerHTML=''; deletedVars[t]=[]; m.forEach((val,key)=>addVarRow(t,key,val)); }catch(e){ c.innerHTML='Load Error'; } }
       async function loadGlobalConfig(){ try{ const r=await fetch('/api/auto_config'); const c=await r.json(); document.getElementById('auto_update_toggle').checked=!!c.enabled; document.getElementById('auto_update_interval').value=c.interval||30; document.getElementById('fuse_threshold').value=c.fuseThreshold||0; }catch(e){} }
       async function saveAutoConfig(){ await fetch('/api/auto_config',{method:'POST',body:JSON.stringify({enabled:document.getElementById('auto_update_toggle').checked,interval:document.getElementById('auto_update_interval').value,fuseThreshold:document.getElementById('fuse_threshold').value})}); alert('已保存配置'); }
-      async function checkUpdate(t){ const e=document.getElementById(\`ver_\${t}\`); try{ const r=await fetch(\`/api/check_update?type=\${t}\`); const d=await r.json(); if(d.remote&&(!d.local||d.remote.sha!==d.local.sha))e.innerHTML=\`<span class="text-red-500 font-bold animate-pulse">🔴 New: \${timeAgo(d.remote.date)}</span>\`; else e.innerHTML=\`<span class="text-green-600">✅ Latest</span>\`; }catch(e){ e.innerHTML="Check Fail"; } }
+      
+      async function checkUpdate(t){ 
+          const e=document.getElementById(\`ver_\${t}\`); 
+          try{ 
+              const r=await fetch(\`/api/check_update?type=\${t}\`); 
+              const d=await r.json(); 
+              
+              if(d.error) throw new Error(d.error);
+
+              const remoteDate = new Date(d.remote.date).toLocaleString([], {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+              let statusHtml = '';
+              let localDateStr = '未部署';
+
+              if (d.local && d.local.date) {
+                   localDateStr = new Date(d.local.date).toLocaleString([], {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+              }
+
+              if(d.remote && (!d.local || d.remote.sha !== d.local.sha)) {
+                  statusHtml = \`<div class="flex justify-between text-red-600 font-bold"><span>🚀 上游: \${remoteDate}</span><span class="animate-pulse">New!</span></div>\`;
+              } else {
+                  statusHtml = \`<div class="flex justify-between text-green-600"><span>✅ 上游: \${remoteDate}</span><span>Latest</span></div>\`;
+              }
+              
+              const localClass = (d.local && d.remote && d.local.sha === d.remote.sha) ? 'text-gray-500' : 'text-orange-500 font-bold';
+              const localHtml = \`<div class="flex justify-between \${localClass}"><span>💻 本地: \${localDateStr}</span><span>\${d.mode==='fixed'?'🔒 Locked':''}</span></div>\`;
+
+              e.innerHTML = statusHtml + localHtml;
+          }catch(e){ 
+              e.innerHTML="<span class='text-red-400'>Check Fail</span>"; 
+          } 
+      }
+      
       function timeAgo(s){ const sec=(new Date()-new Date(s))/1000; if(sec>86400)return Math.floor(sec/86400)+"天前"; if(sec>3600)return Math.floor(sec/3600)+"小时前"; return "刚刚"; }
       function refreshUUID(t){ const k=TEMPLATES[t].uuidField; if(k)document.querySelectorAll(\`.var-row-\${t}\`).forEach(r=>{ if(r.querySelector('.key').value===k){ const i=r.querySelector('.val'); i.value=crypto.randomUUID(); i.classList.add('bg-green-100'); setTimeout(()=>i.classList.remove('bg-green-100'),500); } }); }
       async function checkDeployConfig(t){ try{ const r=await fetch(\`/api/deploy_config?type=\${t}\`); const c=await r.json(); deployConfigs[t]=c; const b=document.getElementById(\`badge_\${t}\`); if(c.mode==='fixed'){ b.className="text-[9px] px-1.5 py-0.5 rounded text-white bg-orange-500 font-bold"; b.innerText="🔒 Locked"; }else{ b.className="text-[9px] px-1.5 py-0.5 rounded text-white bg-green-500"; b.innerText="Auto Update"; } }catch(e){} }
@@ -1282,13 +1345,12 @@ const TEMPLATES = {
           modal.classList.remove('hidden');
           hList.innerHTML='<div class="text-center text-gray-400 text-xs py-4">加载中...</div>';
           fList.innerHTML=''; 
-          fSec.classList.add('hidden'); // 先隐藏，有数据再显示
+          fSec.classList.add('hidden'); 
 
           try{
             const[histRes,favRes]=await Promise.all([fetch(\`/api/check_update?type=\${type}&mode=history&limit=\${limit}\`),fetch(\`/api/favorites?type=\${type}\`)]);
             const histData=await histRes.json();const favData=await favRes.json();
             
-            // 收藏夹渲染
             if(favData && Array.isArray(favData) && favData.length > 0){
                 fSec.classList.remove('hidden');
                 favData.forEach(item=>renderHistoryItem(type,item,fList,true));
@@ -1336,3 +1398,4 @@ const TEMPLATES = {
   </body></html>
     `;
   }
+}
