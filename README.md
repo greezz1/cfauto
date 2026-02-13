@@ -1,9 +1,7 @@
-# 🚀 Cloudflare Worker 智能部署中控 (Worker Manager Pro V9.9.1)
+# 🚀 Cloudflare Worker 智能部署中控 (V9.9.6 Pro)
 
 > 全部代码为claude code 完成
 > 自行修改延伸功能
-
-# 🚀 Cloudflare Worker 智能部署中控 (V9.9.6 Pro)
 
 > **版本状态**: V9.9.6 Stable
 > **核心进化**: 引入 **服务器端代码混淆**、**熔断保护机制** 与 **收藏版本管理（此功能没生效）**。
