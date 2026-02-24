@@ -353,7 +353,11 @@ function handleAdminPage(pwd) {
         </div>
 
         <div class="add-row">
-            <input type="text" id="newToken" placeholder="新 Token (如 a1b2c3d4)" style="flex:1; min-width: 150px;">
+            <div style="display:flex;gap:6px;align-items:center;flex:1;min-width:220px;">
+                <input type="text" id="newToken" placeholder="新 Token / UUID" style="flex:1;">
+                <button onclick="genUUID()" style="background:#8b5cf6;padding:4px 10px;font-size:12px;white-space:nowrap;">&#x1F3B2; 随机 UUID</button>
+            </div>
+            <input type="text" id="newRemark" placeholder="备注（设备名/帐号名）" style="min-width:120px;flex:0.6;">
             <div class="quick-btns" id="addQuickBtns">
                 <span style="font-size:12px;color:#64748b;align-self:center;">有效期:</span>
                 <button onclick="setAddExpire(1)">1天</button>
@@ -371,14 +375,15 @@ function handleAdminPage(pwd) {
         <table>
             <thead>
                 <tr>
-                    <th style="width: 28%">Token 凭证标识</th>
-                    <th style="width: 20%">有效期状态</th>
-                    <th style="width: 12%">设备上限</th>
-                    <th style="width: 40%">操作</th>
+                    <th style="width: 22%">Token 凭证标识</th>
+                    <th style="width: 14%">备注</th>
+                    <th style="width: 18%">有效期状态</th>
+                    <th style="width: 10%">设备上限</th>
+                    <th style="width: 36%">操作</th>
                 </tr>
             </thead>
             <tbody id="tokenList">
-                <tr><td colspan="4" style="text-align: center;">加载中...</td></tr>
+                <tr><td colspan="5" style="text-align: center;">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -481,7 +486,7 @@ function handleAdminPage(pwd) {
             tbody.innerHTML = '';
             
             if(fullData.tokens.length === 0) {
-               tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;color:#94a3b8">空空如也，请在上方添加</td></tr>';
+               tbody.innerHTML = '<tr><td colspan="5" style="text-align: center;color:#94a3b8">空空如也，请在上方添加</td></tr>';
                return; 
             }
             
@@ -491,10 +496,18 @@ function handleAdminPage(pwd) {
                 const dl = daysLeft(item.expire);
                 const maxD = item.maxDevices || 0;
                 const maxDLabel = maxD > 0 ? maxD + ' 台' : '♾️ 不限';
+                const remarkText = item.remark || '';
                 const rowHtml = '' +
                     '<td>' +
-                        '<span id="text-token-' + index + '"><code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;">' + item.token + '</code></span>' +
+                        '<span id="text-token-' + index + '"><code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;word-break:break-all;">' + item.token + '</code></span>' +
                         '<input type="text" id="edit-token-' + index + '" value="' + item.token + '" style="display:none; width: 100%;" />' +
+                        '<div id="edit-genUUID-' + index + '" style="display:none;margin-top:4px;">' +
+                            '<button onclick="genUUIDFor(' + index + ')" style="font-size:11px;background:#8b5cf6;padding:2px 8px;">&#x1F3B2; UUID</button>' +
+                        '</div>' +
+                    '</td>' +
+                    '<td>' +
+                        '<span id="text-remark-' + index + '" style="color:#64748b;font-size:12px;">' + (remarkText || '<em style="color:#cbd5e1;">无</em>') + '</span>' +
+                        '<input type="text" id="edit-remark-' + index + '" value="' + remarkText + '" placeholder="备注" style="display:none; width: 100%;" />' +
                     '</td>' +
                     '<td>' +
                         '<span id="text-expire-' + index + '" class="days-left ' + dl.cls + '">' + dl.label + '</span>' +
@@ -565,17 +578,37 @@ function handleAdminPage(pwd) {
             showToast('已设定 ' + days + ' 天后到期');
         }
 
+        // 生成标准 UUID v4
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = crypto.getRandomValues(new Uint8Array(1))[0] % 16;
+                return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
+        }
+
+        // 点击新增区的随机 UUID 按钮
+        function genUUID() {
+            document.getElementById('newToken').value = generateUUID();
+        }
+
+        // 点击编辑行的随机 UUID 按钮
+        function genUUIDFor(idx) {
+            document.getElementById('edit-token-' + idx).value = generateUUID();
+        }
+
         function startEdit(idx) {
             // 初始化编辑区暂存为原值
             editExpireMap[idx] = fullData.tokens[idx].expire || null;
 
             document.getElementById('text-token-' + idx).style.display = 'none';
+            document.getElementById('text-remark-' + idx).style.display = 'none';
             document.getElementById('text-expire-' + idx).style.display = 'none';
             document.getElementById('text-maxdev-' + idx).style.display = 'none';
             document.getElementById('edit-token-' + idx).style.display = 'block';
+            document.getElementById('edit-genUUID-' + idx).style.display = 'block';
+            document.getElementById('edit-remark-' + idx).style.display = 'block';
             document.getElementById('edit-expire-' + idx).style.display = 'block';
             document.getElementById('edit-maxdev-' + idx).style.display = 'block';
-            // 预填当前已设定的并发数
             const curMax = fullData.tokens[idx].maxDevices || 0;
             document.getElementById('maxdev-input-' + idx).value = curMax > 0 ? curMax : '';
 
@@ -598,6 +631,9 @@ function handleAdminPage(pwd) {
             if(duplicate) { showToast('Token 已存在', true); return; }
             
             fullData.tokens[idx].token = newToken;
+            // 写入备注
+            const newRemark = document.getElementById('edit-remark-' + idx).value.trim();
+            if (newRemark) { fullData.tokens[idx].remark = newRemark; } else { delete fullData.tokens[idx].remark; }
             // 读取快捷按钮接管的暂存值
             if (idx in editExpireMap) {
                 if (editExpireMap[idx]) {
@@ -638,12 +674,15 @@ function handleAdminPage(pwd) {
             if(fullData.tokens.find(x => x.token === t)) { showToast('Token 已存在', true); return; }
             
             const newItem = { token: t };
+            const r = document.getElementById('newRemark').value.trim();
+            if (r) newItem.remark = r;
             if(addExpireDate) newItem.expire = addExpireDate;
             const maxD = parseInt(document.getElementById('newMaxDevices').value);
             if(!isNaN(maxD) && maxD > 0) newItem.maxDevices = maxD;
             
             fullData.tokens.push(newItem);
             document.getElementById('newToken').value = '';
+            document.getElementById('newRemark').value = '';
             document.getElementById('newExpireDays').value = '';
             document.getElementById('newMaxDevices').value = '';
             document.getElementById('addExpirePreview').innerText = '永久有效';
