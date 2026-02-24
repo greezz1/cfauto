@@ -1,7 +1,7 @@
 /**
- * Cloudflare Worker 多项目部署管理器 (V10.8.0 - ECH Workers.dev Switch)
- * 更新日志 (V10.8.0)：
- * 1. [Feature] ECH 部署新增"禁用 workers.dev 域名"开关，部署成功后自动调用 CF API 控制。
+ * Cloudflare Worker 多项目部署管理器 (V10.10.0)
+ * 更新日志 (V10.10.0)：
+ * 1. [Feature] 首创 YXIP 面向 Joey 底层的双轨分发策略，兼顾 KV 数据流强管与纯变量下发兼容模式。
  * 完整历史版本记录见 CHANGELOG.md
  */
 
@@ -25,7 +25,7 @@ const TEMPLATES = {
         ghRepo: "cfnew",
         ghBranch: "main",
         ghPath: "少年你相信光吗",
-        defaultVars: ["u", "d", "p"],
+        defaultVars: ["u"],
         uuidField: "u",
         description: "Joey (自动修复) - KV 可选"
     },
@@ -155,8 +155,8 @@ export default {
                 return await handleGetCode(env, type);
             }
             if (url.pathname === "/api/deploy" && request.method === "POST") {
-                const { type, variables, deletedVariables, targetSha, customCode, echTokenEnabled, echDisableWorkersDev } = await request.json();
-                return await handleManualDeploy(env, type, variables, deletedVariables, ACCOUNTS_KEY, targetSha, customCode, echTokenEnabled, echDisableWorkersDev);
+                const { type, variables, deletedVariables, targetSha, customCode, echTokenEnabled, echDisableWorkersDev, targetAccountIds } = await request.json();
+                return await handleManualDeploy(env, type, variables, deletedVariables, ACCOUNTS_KEY, targetSha, customCode, echTokenEnabled, echDisableWorkersDev, targetAccountIds);
             }
             if (url.pathname === "/api/batch_deploy" && request.method === "POST") {
                 const data = await request.json();
@@ -190,6 +190,13 @@ export default {
             if (url.pathname === "/api/fix_1101" && request.method === "POST") {
                 const { type } = await request.json();
                 return await handleFix1101(env, type);
+            }
+            if (url.pathname === "/api/get_regions_data" && request.method === "GET") {
+                return await handleGetRegionsData();
+            }
+            if (url.pathname === "/api/save_yxip" && request.method === "POST") {
+                const data = await request.json();
+                return await handleSaveYxip(env, data, ACCOUNTS_KEY);
             }
 
             return new Response(mainHtml(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
@@ -356,12 +363,12 @@ async function handleCheckUpdate(env, type, mode, limit = 10) {
     } catch (e) { return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
 }
 
-async function handleManualDeploy(env, type, variables, deletedVariables, accountsKey, targetSha, customCode, echTokenEnabled, echDisableWorkersDev) {
+async function handleManualDeploy(env, type, variables, deletedVariables, accountsKey, targetSha, customCode, echTokenEnabled, echDisableWorkersDev, targetAccountIds) {
     if (customCode) {
-        const result = await coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha, customCode, echTokenEnabled, echDisableWorkersDev);
+        const result = await coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha, customCode, echTokenEnabled, echDisableWorkersDev, targetAccountIds);
         return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
     }
-    const result = await coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha, null, echTokenEnabled, echDisableWorkersDev);
+    const result = await coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha, null, echTokenEnabled, echDisableWorkersDev, targetAccountIds);
     return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
 }
 
@@ -495,13 +502,16 @@ async function handleBatchDeploy(env, reqData, accountsKey) {
 }
 
 // 核心部署逻辑
-async function coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha, customCode = null, echTokenEnabled = false, echDisableWorkersDev = false) {
+async function coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha, customCode = null, echTokenEnabled = false, echDisableWorkersDev = false, targetAccountIds = null) {
     try {
         // 规范化：'latest' 和空值统一视为“跟随最新”
         const isLatestMode = !targetSha || targetSha === 'latest';
         const shaForFetch = isLatestMode ? null : targetSha;
 
-        const accounts = JSON.parse(await env.CONFIG_KV.get(accountsKey) || "[]");
+        let accounts = JSON.parse(await env.CONFIG_KV.get(accountsKey) || "[]");
+        if (targetAccountIds && targetAccountIds.length > 0) {
+            accounts = accounts.filter(a => targetAccountIds.includes(a.accountId));
+        }
         if (accounts.length === 0) return [{ name: "提示", success: false, msg: "无账号配置" }];
 
         let githubScriptContent = "";
@@ -954,6 +964,128 @@ async function handleFix1101(env, type) {
     return new Response(JSON.stringify(logs), { headers: { "Content-Type": "application/json" } });
 }
 
+// 提取并返回全球区域节点的基础数据（替代前端调用外部txt）
+async function handleGetRegionsData() {
+    try {
+        const response = await fetch("https://zip.cm.edu.kg/all.txt");
+        let text = await response.text();
+        text = text.replace(/^\uFEFF/, '');
+        const lines = text.split('\n');
+
+        const regionPools = {};
+        for (const line of lines) {
+            if (!line.includes('#')) continue;
+            const parts = line.split('#');
+            const code = parts[1] ? parts[1].trim().toUpperCase() : '';
+            const ipPort = parts[0].trim();
+
+            if (code) {
+                if (!regionPools[code]) regionPools[code] = [];
+                regionPools[code].push({ line, code, ipPort });
+            }
+        }
+        return new Response(JSON.stringify({ success: true, data: regionPools }), {
+            headers: { 'content-type': 'application/json; charset=UTF-8' }
+        });
+    } catch (e) {
+        return new Response(JSON.stringify({ success: false, msg: "Error fetching data: " + e.message }), { status: 500 });
+    }
+}
+
+// 保存优选节点逻辑
+async function handleSaveYxip(env, reqData, accountsKey) {
+    const { type, accountId, email, globalKey, rawContent } = reqData;
+
+    // 针对旧模式（无 KV）的 Joey：覆盖中控的 VARS_joey 全局变量 'yx' 
+    if (type === 'joey_var') {
+        const VARS_KEY = `VARS_joey`;
+        try {
+            const varsStr = await env.CONFIG_KV.get(VARS_KEY);
+            let variables = varsStr ? JSON.parse(varsStr) : [];
+            const idx = variables.findIndex(v => v.key === 'yx');
+            if (idx !== -1) {
+                variables[idx] = { key: 'yx', type: "plain_text", value: rawContent };
+            } else {
+                variables.push({ key: 'yx', type: "plain_text", value: rawContent });
+            }
+            await env.CONFIG_KV.put(VARS_KEY, JSON.stringify(variables));
+            return new Response(JSON.stringify([{ name: "Joey 全局变量 (无 KV 模式)", success: true, msg: "✅ 变量 [yx] 已成功覆盖至全体记录供稍后部署使用", type: 'joey' }]), { headers: { "Content-Type": "application/json" } });
+        } catch (e) {
+            return new Response(JSON.stringify([{ name: "写入错误", success: false, msg: e.message }]), { status: 500 });
+        }
+    }
+
+    // 不论是 cmliu 还是 joey，都需要写入对应 Worker 的目标绑定 KV 空间
+    if (type === 'cmliu' || type === 'joey') {
+        if (!accountId || !email || !globalKey) return new Response(JSON.stringify([{ name: "配置错误", success: false, msg: "未提供对应账户凭证" }]), { status: 400 });
+
+        try {
+            const accounts = JSON.parse(await env.CONFIG_KV.get(accountsKey) || "[]");
+            const targetAccount = accounts.find(a => a.accountId === accountId);
+            if (!targetAccount) return new Response(JSON.stringify([{ name: "查找错误", success: false, msg: "系统记录中找不到该账户" }]), { status: 404 });
+
+            const targetWorkers = type === 'cmliu' ? targetAccount.workers_cmliu : targetAccount.workers_joey;
+            const workerTypeName = type === 'cmliu' ? 'CMLiu' : 'Joey';
+            if (!targetWorkers || targetWorkers.length === 0) return new Response(JSON.stringify([{ name: "查找错误", success: false, msg: `该账号下未发现已部署的 ${workerTypeName} 项目` }]), { status: 200 });
+
+            const logs = [];
+            const jsonHeaders = getAuthHeaders(email, globalKey);
+
+            for (const wName of targetWorkers) {
+                const logItem = { name: `[${workerTypeName}] ${wName}`, success: false, msg: "" };
+                try {
+                    // 1. 获取该 Worker 的绑定的 KV ID
+                    const bindRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${wName}/bindings`, { headers: jsonHeaders });
+                    if (!bindRes.ok) throw new Error("无法读取绑定的变量");
+
+                    const binds = (await bindRes.json()).result;
+                    const kvBind = binds.find(b => b.type === 'kv_namespace' && (b.name === 'KV' || b.name === 'CONFIG' || b.name === 'C'));
+                    if (!kvBind) {
+                        logItem.msg = "❌ 该项目未绑定名为 KV/CONFIG/C 的核心配置空间";
+                    } else {
+                        const nsId = kvBind.namespace_id;
+                        // 2. 将内容写入到空间的指定键
+                        let targetKey = "ADD.txt";
+                        let finalContent = rawContent;
+                        let contentType = "text/plain";
+
+                        if (type === 'joey') {
+                            targetKey = "c";
+                            // 构造最终的 JSON 内容
+                            const configObj = { "ev": "yes", "et": "no", "ex": "no", "epd": "no", "epi": "yes", "egi": "no", "d": "990200", "ipv4": "yes", "ipv6": "no", "ispMobile": "yes", "ispUnicom": "no", "ispTelecom": "no", "yx": rawContent, "dkby": "yes", "ech": "yes", "scu": "https://SUBAPI.cmliussss.net" };
+                            finalContent = JSON.stringify(configObj);
+                            contentType = "application/json";
+                        }
+
+                        const putRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${nsId}/values/${targetKey}`, {
+                            method: "PUT",
+                            headers: {
+                                ...jsonHeaders,
+                                "Content-Type": contentType
+                            },
+                            body: finalContent
+                        });
+
+                        if (putRes.ok) {
+                            logItem.success = true;
+                            logItem.msg = `✅ 已更新对应命名空间的 ${targetKey}`;
+                        } else {
+                            logItem.msg = `❌ 写入失败: ${(await putRes.json()).errors?.[0]?.message}`;
+                        }
+                    }
+                } catch (e) { logItem.msg = `❌ ${e.message}`; } // loop block catch
+                logs.push(logItem);
+            }
+            return new Response(JSON.stringify(logs), { headers: { "Content-Type": "application/json" } });
+
+        } catch (e) {
+            return new Response(JSON.stringify([{ name: "执行异常", success: false, msg: e.message }]), { status: 500 });
+        }
+    }
+
+    return new Response(JSON.stringify([{ name: "参数错误", success: false, msg: "未知的请求类型: " + type }]), { status: 400 });
+}
+
 function loginHtml() {
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Login</title></head>
 <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6;font-family:sans-serif">
@@ -990,7 +1122,7 @@ function mainHtml() {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="manifest" href="/manifest.json">
-    <title>Worker 智能中控 (V10.6.0)</title>
+    <title>Worker 智能中控 (V10.10.0)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
@@ -1100,7 +1232,7 @@ function mainHtml() {
       
       <header class="bg-white px-4 py-3 md:px-6 md:py-4 rounded shadow flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
           <div class="flex-none">
-              <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">🚀 Worker 部署中控 <span class="text-xs bg-purple-600 text-white px-2 py-0.5 rounded ml-2">V10.6.0</span></h1>
+              <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">🚀 Worker 部署中控 <span class="text-xs bg-purple-600 text-white px-2 py-0.5 rounded ml-2">V10.10.0</span></h1>
               <div class="text-[10px] text-gray-400 mt-1">安全加固 · 熔断轮换 · 子域名管理 · 星空主题</div>
           </div>
           <div id="logs" class="bg-slate-900 text-green-400 p-2 rounded text-xs font-mono hidden max-h-[80px] lg:max-h-[50px] overflow-y-auto shadow-inner w-full lg:flex-1 lg:mx-4 order-2 lg:order-none"></div>
@@ -1110,6 +1242,7 @@ function mainHtml() {
                <div class="w-px h-4 bg-gray-300 mx-0"></div>
                <button onclick="openWorkbench()" id="btn_workbench" class="bg-slate-700 text-white px-2 py-1 rounded hover:bg-slate-800 font-bold">📋 工作台</button>
                <button onclick="openBatchDeployModal()" class="bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700 font-bold">✨ 批量部署</button>
+               <button onclick="accounts.some(a => (a.workers_cmliu && a.workers_cmliu.length > 0) || (a.workers_joey && a.workers_joey.length > 0)) ? showYxipModal() : alert('必须先部署至少一个支持的代理项目 (CMLiu 或 Joey) 才能使用反代落地部署功能！')" class="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 font-bold shadow-sm">⚡ 反代落地部署</button>
                <div class="w-px h-4 bg-gray-300 mx-1"></div>
                
                <div class="flex items-center gap-1">
@@ -1250,8 +1383,7 @@ function mainHtml() {
                         </div>
                     </div>
                     <div class="flex gap-2">
-                        <button onclick="selectSyncAccount('ech')" class="flex-1 bg-orange-50 text-orange-600 border border-orange-200 text-xs px-2 py-1 rounded hover:bg-orange-100">🔄 同步</button>
-                        <button onclick="deploy('ech')" id="btn_deploy_ech" class="flex-[2] bg-green-600 text-white text-xs py-1.5 rounded hover:bg-green-700 font-bold">🚀 部署 ECH</button>
+                        <button onclick="deploy('ech')" id="btn_deploy_ech" class="w-full bg-green-600 text-white text-xs py-1.5 rounded font-bold hover:bg-green-700">🚀 部署配置</button>
                     </div>
                 </div>
             </div>
@@ -1318,6 +1450,65 @@ function mainHtml() {
                 <div class="pt-2 border-t flex justify-end gap-2">
                     <button onclick="document.getElementById('batch_deploy_modal').classList.add('hidden')" class="px-3 py-1.5 bg-gray-100 text-gray-600 rounded">取消</button>
                     <button onclick="doBatchDeploy()" id="btn_do_batch" class="px-3 py-1.5 bg-indigo-600 text-white rounded font-bold hover:bg-indigo-700">🚀 开始部署</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="yxip_modal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex justify-center items-start pt-[5vh] z-[60] overflow-y-auto">
+        <div class="bg-white rounded-lg shadow-2xl flex flex-col w-[90%] max-w-[800px] my-[5vh]">
+            <div class="bg-gradient-to-r from-yellow-500 to-yellow-600 p-4 rounded-t-lg flex justify-between items-center text-white shadow-sm">
+                <h3 class="font-bold text-lg flex items-center gap-2">⚡ 反代落地部署 (YXIP)</h3>
+                <button onclick="document.getElementById('yxip_modal').classList.add('hidden')" class="hover:bg-white/20 px-2 py-0.5 rounded transition-colors text-xl">×</button>
+            </div>
+            
+            <div class="p-5 overflow-y-auto">
+                <!-- Step 1: 目标配置 -->
+                <div class="mb-6">
+                    <h4 class="font-bold text-gray-700 border-b pb-2 mb-3 border-yellow-200">1. 操作目标配置</h4>
+                    <div class="bg-yellow-50 p-4 border border-yellow-100 rounded-lg">
+                        <label class="block text-sm font-bold text-gray-700 mb-2">更新策略类型：</label>
+                        <select id="yxip_type" class="input-field w-full mb-4 bg-white" onchange="toggleYxipAccountSelect()">
+                            <option value="joey">🚀 Joey 专属 (KV 模式): 写入目标账号项目绑定的核心配置库 (键 c)</option>
+                            <option value="joey_var">🪐 Joey 兼容 (变量模式): 写入中控面板供当前所有 Joey 项目统一使用的全局变量组 [yx]</option>
+                            <option value="cmliu">🌐 CMLiu 专属 (KV 模式): 写入目标账号项目绑定的自带节点列表库 (ADD.txt)</option>
+                        </select>
+
+                        <div id="yxip_cmliu_account_area" class="mt-3">
+                            <label class="block text-sm font-bold text-slate-700 mb-2">选择目标 CF 账号 (对应其绑定的项目):</label>
+                            <div id="yxip_account_list" class="max-h-[150px] overflow-y-auto border rounded p-3 bg-white grid grid-cols-1 md:grid-cols-2 gap-2 shadow-inner">
+                                <!-- JS dynamically populates accounts -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 2: 选区配置 -->
+                <div>
+                    <h4 class="font-bold text-gray-700 border-b pb-2 mb-3 border-yellow-200 flex justify-between">
+                        <span>2. 节点筛选池要求</span>
+                        <div class="flex items-center gap-2 text-sm font-normal">
+                            <label>单地区上限:</label>
+                            <input type="number" id="yxip_limit" value="10" min="1" max="100" class="input-field bg-white py-1 w-[80px] text-center">
+                            <span>个</span>
+                        </div>
+                    </h4>
+                    
+                    <div class="flex gap-2 mb-3">
+                        <button onclick="yxipSelectAll()" class="px-3 py-1 bg-gray-100 border text-gray-700 shadow-sm hover:bg-gray-200 rounded text-sm transition-colors">全选</button>
+                        <button onclick="yxipSelectNone()" class="px-3 py-1 bg-gray-100 border text-gray-700 shadow-sm hover:bg-gray-200 rounded text-sm transition-colors">反选</button>
+                    </div>
+                    
+                    <div id="yxip_regions" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-2 text-sm max-h-[250px] overflow-y-auto p-2 border rounded bg-gray-50 shadow-inner">
+                        <div class="col-span-full text-center py-4 text-gray-400">正在获取全球节点数据...</div>
+                    </div>
+                </div>
+
+                <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-gray-100">
+                    <button onclick="document.getElementById('yxip_modal').classList.add('hidden')" class="px-4 py-2 bg-gray-100 text-gray-600 rounded font-bold hover:bg-gray-200 transition-colors">取消</button>
+                    <button onclick="doYxipDeploy()" class="px-6 py-2 bg-gradient-to-r from-yellow-500 to-yellow-600 text-white rounded font-bold hover:from-yellow-600 hover:to-yellow-700 shadow-md transition-all flex items-center gap-2">
+                        <span id="yxip_btn_icon">⚡</span> 开始提取与部署
+                    </button>
                 </div>
             </div>
         </div>
@@ -2208,17 +2399,240 @@ function mainHtml() {
           const isDark = html.getAttribute('data-theme') === 'dark';
           if (isDark) {
               html.removeAttribute('data-theme');
-              document.getElementById('theme_btn').innerText = '\ud83c\udf19';
+              document.getElementById('theme_btn').innerText = '🌙';
               stopStarfield();
               localStorage.setItem('worker_theme', 'light');
           } else {
               html.setAttribute('data-theme', 'dark');
-              document.getElementById('theme_btn').innerText = '\u2600\ufe0f';
+              document.getElementById('theme_btn').innerText = '☀️';
               initStarfield();
               localStorage.setItem('worker_theme', 'dark');
           }
       }
+
+      // ================= YXIP 前端核心逻辑 =================
+      const REGION_MAP = {'JP':'日本','KR':'韩国','SG':'新加坡','HK':'香港','TW':'台湾','MY':'马来西亚','TH':'泰国','VN':'越南','PH':'菲律宾','ID':'印尼','IN':'印度','AU':'澳大利亚','NZ':'新西兰','GB':'英国','UK':'英国','DE':'德国','FR':'法国','NL':'荷兰','IT':'意大利','ES':'西班牙','US':'美国','CA':'加拿大','BR':'巴西','ZA':'南非','AE':'阿联酋','RU':'俄罗斯','UA':'乌克兰','SE':'瑞典','CH':'瑞士','TR':'土耳其','AR':'阿根廷','CL':'智利','CO':'哥伦比亚','PE':'秘鲁','MX':'墨西哥','PL':'波兰','FI':'芬兰','NO':'挪威','DK':'丹麦','IE':'爱尔兰','BE':'比利时','AT':'奥地利','CZ':'捷克','HU':'匈牙利','RO':'罗马尼亚','GR':'希腊','PT':'葡萄牙'};
+      function getFlagEmoji(code) { if (code === 'TW') return '🇹🇼'; if (code === 'UK') return '🇬🇧'; if (!code || code.length !== 2) return '🇺🇳'; const codePoints = code.toUpperCase().split('').map(char => 127397 + char.charCodeAt()); return String.fromCodePoint(...codePoints); }
       
+      let yxipData = {};
+      let yxipSelected = [];
+
+      async function showYxipModal() {
+          document.getElementById('yxip_modal').classList.remove('hidden');
+          toggleYxipAccountSelect();
+          if (Object.keys(yxipData).length === 0) {
+              await fetchYxipRegions();
+          }
+      }
+
+      function toggleYxipAccountSelect() {
+          const type = document.getElementById('yxip_type').value;
+          const accountArea = document.getElementById('yxip_cmliu_account_area');
+          const accountList = document.getElementById('yxip_account_list');
+          
+          accountArea.classList.remove('hidden');
+          const borderCls = type === 'cmliu' ? 'border-red-200' : 'border-blue-200';
+          const txtCls = type === 'cmliu' ? 'text-red-500' : 'text-blue-500';
+          const bgHoverCls = type === 'cmliu' ? 'hover:bg-red-50' : 'hover:bg-blue-50';
+          const badgeBgCls = type === 'cmliu' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600';
+          const targetArrName = type === 'cmliu' ? 'workers_cmliu' : 'workers_joey';
+          const targetNameStr = type === 'cmliu' ? 'CMLiu' : 'Joey';
+          
+          const btnHtml = '<div class="col-span-full flex gap-2 mb-1"><button onclick="document.querySelectorAll(\\\'input[name=yxip_account]:not([disabled])\\\').forEach(c=>c.checked=true)" class="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded">全选有效账号</button><button onclick="document.querySelectorAll(\\\'input[name=yxip_account]\\\').forEach(c=>c.checked=false)" class="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded">反选所有账号</button></div>';
+          
+          accountList.className = 'max-h-[150px] overflow-y-auto border rounded p-3 bg-white grid grid-cols-1 md:grid-cols-2 gap-2 shadow-inner ' + borderCls;
+          accountList.innerHTML = btnHtml + accounts.map(a => {
+              const targetWorkers = a[targetArrName] || [];
+              const noWorker = targetWorkers.length === 0;
+              const badge = noWorker ? '<span class="text-[10px] text-gray-400 ml-auto mx-1">无 ' + targetNameStr + ' 项目</span>' : '<span class="' + badgeBgCls + ' px-1.5 py-0.5 rounded text-[10px] ml-auto">' + targetWorkers.length + ' 个项目</span>';
+              const opacityClass = noWorker ? 'opacity-50 grayscale' : '';
+              const disabledAttr = noWorker ? 'disabled' : '';
+              return '<label class="flex items-center gap-2 p-2 border rounded cursor-pointer transition-colors ' + bgHoverCls + ' ' + opacityClass + '">' +
+                  '<input type="checkbox" name="yxip_account" value="' + a.accountId + '" class="' + txtCls + '" ' + disabledAttr + '>' +
+                  '<span class="text-xs font-bold text-gray-700 truncate" title="' + a.email + '">' + a.email + '</span>' +
+                  badge +
+              '</label>';
+          }).join('');
+      }
+
+      async function fetchYxipRegions() {
+          const container = document.getElementById('yxip_regions');
+          container.innerHTML = '<div class="col-span-full text-center py-4 text-gray-400">✈️ 正在获取全球节点数据...</div>';
+          try {
+              const res = await fetch('/api/get_regions_data');
+              const data = await res.json();
+              if(data.success) {
+                  yxipData = data.data;
+                  renderYxipRegions();
+              } else {
+                  container.innerHTML = '<div class="col-span-full text-center py-4 text-red-500">❌ 获取失败: ' + data.msg + '</div>';
+              }
+          } catch(e) {
+              container.innerHTML = '<div class="col-span-full text-center py-4 text-red-500">❌ 网络异常，获取节点数据失败</div>';
+          }
+      }
+
+      function renderYxipRegions() {
+          const container = document.getElementById('yxip_regions');
+          const codes = Object.keys(yxipData).sort();
+          if (codes.length === 0) {
+              container.innerHTML = '<div class="col-span-full text-center py-4 text-gray-400">没有找到任何可用节点</div>';
+              return;
+          }
+          container.innerHTML = codes.map(code => {
+              const count = yxipData[code].length;
+              const cname = REGION_MAP[code] || code;
+              return '<label class="flex items-center gap-1.5 p-1.5 border rounded cursor-pointer hover:bg-yellow-50 transition-colors">' +
+                  '<input type="checkbox" value="' + code + '" onchange="toggleYxipRegion(this)" class="text-yellow-500 accent-yellow-500 rounded">' +
+                  '<span class="font-bold text-gray-700 text-sm truncate">' + cname + '</span>' +
+                  '<span class="text-[10px] text-gray-400 ml-auto">' + count + '</span>' +
+              '</label>';
+          }).join('');
+      }
+
+      function toggleYxipRegion(checkbox) {
+          if(checkbox.checked) yxipSelected.push(checkbox.value);
+          else yxipSelected = yxipSelected.filter(v => v !== checkbox.value);
+      }
+
+      function yxipSelectAll() {
+          document.querySelectorAll('#yxip_regions input[type="checkbox"]').forEach(cb => {
+              if(!cb.checked) { cb.checked = true; yxipSelected.push(cb.value); }
+          });
+      }
+
+      function yxipSelectNone() {
+          document.querySelectorAll('#yxip_regions input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+          yxipSelected = [];
+      }
+      
+      // Fisher-Yates shuffle
+      function shuffleArray(array) {
+          for (let i = array.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [array[i], array[j]] = [array[j], array[i]];
+          }
+          return array;
+      }
+
+      async function doYxipDeploy() {
+          const type = document.getElementById('yxip_type').value;
+          const limit = parseInt(document.getElementById('yxip_limit').value) || 10;
+          
+          if (yxipSelected.length === 0) return alert('⚠️ 请至少选择一个区域！');
+
+          let targetAccounts = [];
+          const checkedBoxes = Array.from(document.querySelectorAll('input[name="yxip_account"]:checked'));
+          if (checkedBoxes.length === 0) {
+               return alert(type === 'cmliu' ? '⚠️ 请至少选择一个包含有 CMLiu 项目的目标账号！' : '⚠️ 请至少选择一个包含有 Joey 项目的目标账号！');
+          }
+          checkedBoxes.forEach(box => {
+              const acc = accounts.find(a => a.accountId === box.value);
+              if (acc) targetAccounts.push(acc);
+          });
+
+          const btnIcon = document.getElementById('yxip_btn_icon');
+          btnIcon.innerHTML = '<svg class="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+          
+          // 组装内容
+          const regionCounters = {};
+          const results = [];
+          
+          for (const region of yxipSelected) {
+              const ipList = shuffleArray([...yxipData[region]]); // 深拷贝并打乱
+              const toTake = Math.min(limit, ipList.length);
+              
+              for (let i = 0; i < toTake; i++) {
+                  const item = ipList[i];
+                  const code = item.code;
+                  regionCounters[code] = (regionCounters[code] || 0) + 1;
+                  const seqNo = regionCounters[code].toString().padStart(2, '0');
+                  const flag = getFlagEmoji(code);
+                  const cname = REGION_MAP[code] || code;
+                  const alias = flag + ' ' + cname + ' ' + seqNo;
+                  results.push(item.ipPort + '#' + alias);
+              }
+          }
+          
+          const rawContent = type.startsWith('joey') ? results.join(',') : results.join('\\n');
+          
+          try {
+              document.getElementById('yxip_modal').classList.add('hidden');
+              openWorkbench();
+              wbLog('⚡ 开始进行反代落地部署...', 'text-yellow-400');
+              
+              if (type === 'joey_var') {
+                  const res = await fetch('/api/save_yxip', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ type: 'joey_var', rawContent })
+                  });
+                  const logs = await res.json();
+                  logs.forEach(l => {
+                      wbLog(l.msg, l.success ? 'text-green-300' : 'text-red-500');
+                  });
+                  
+                  wbLog('🔄 开始触发变量专属重加载部署...', 'text-yellow-300');
+                  try {
+                      const varsRes = await fetch('/api/settings?type=joey');
+                      const varsList = await varsRes.json();
+                      const accIds = targetAccounts.map(a => a.accountId);
+                      
+                      const deployRes = await fetch('/api/deploy', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                              type: 'joey',
+                              variables: varsList,
+                              deletedVariables: [],
+                              targetAccountIds: accIds
+                          })
+                      });
+                      const deployLogs = await deployRes.json();
+                      deployLogs.forEach(l => wbLog('[' + (l.success ? '部署OK' : '报错') + '] ' + l.name + ': ' + l.msg, l.success ? 'text-green-300' : 'text-red-400'));
+                  } catch (e) {
+                      wbLog('⚠️ 下发变量部署失败: ' + e.message, 'text-red-500');
+                  }
+              } else {
+                  for (let i = 0; i < targetAccounts.length; i++) {
+                      const acc = targetAccounts[i];
+                      wbLog('>> 正在处理账号: ' + acc.alias, 'text-blue-300');
+                      const res = await fetch('/api/save_yxip', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                              type,
+                              accountId: acc.accountId,
+                              email: acc.email,
+                              globalKey: acc.globalKey,
+                              rawContent
+                          })
+                      });
+                      const logs = await res.json();
+                      logs.forEach(l => {
+                          wbLog(l.msg, l.success ? 'text-green-300' : 'text-red-500');
+                      });
+                  }
+              }
+              
+              wbLog('部署流程结束！', 'text-white font-bold');
+              
+              if (type === 'joey') {
+                  wbLog('⚡ 提示：优选参数已经作为核心配置文件「c」发送到了指定目标账号下的所有 Joey 项目所绑定的 KV 空间。一般下一次访问接口时立即可生效。', 'text-blue-500 font-bold text-xs mt-2');
+              } else if (type === 'joey_var') {
+                  wbLog('⚡ 提示：优选参数已更新并触发了一次目标对应工作台的重加载执行部署。请留意上方控制台的下发动态。', 'text-blue-500 font-bold text-xs mt-2');
+              } else if (type === 'cmliu') {
+                  wbLog('⚡ 提示：CMLiu 优选节点列表已成功注入目标空间的「ADD.txt」。一般下一次访问接口时立即可生效。', 'text-blue-500 font-bold text-xs mt-2');
+              }
+
+          } catch (e) {
+              alert('请求异常：' + e.message);
+          } finally {
+              btnIcon.innerHTML = '⚡';
+          }
+      }
+      // ==================================================
+
       function applyTheme() {
           const saved = localStorage.getItem('worker_theme');
           if (saved === 'dark') {
